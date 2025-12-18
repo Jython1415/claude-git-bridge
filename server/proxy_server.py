@@ -12,6 +12,13 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, will use system env vars
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,

@@ -1,0 +1,12 @@
+# Server dependencies
+flask>=3.0.0
+requests>=2.31.0
+
+# Client dependencies (minimal)
+requests>=2.31.0
+
+# Optional: for encrypted credentials
+cryptography>=41.0.0
+
+# Development
+pytest>=7.4.0

@@ -4,17 +4,22 @@ Proof of concept tests to verify the git proxy works from Claude.ai Projects.
 
 ## Prerequisites
 
-1. `.env` file added to Claude.ai Project with:
+1. **Add domain to Claude.ai allowed list** (CRITICAL):
+   - Go to Project Settings → Network/Security
+   - Add domain to allowed list: `ganymede.tail0410a7.ts.net`
+   - Without this, all requests will fail with "403 Forbidden"
+
+2. `.env` file added to Claude.ai Project with:
    ```
    GIT_PROXY_URL=https://ganymede.tail0410a7.ts.net
    GIT_PROXY_KEY=<your-secret-key>
    ```
 
-2. `client/git_client.py` uploaded to Project files
+3. `client/git_client.py` uploaded to Project files
 
-3. Flask server running locally (`./scripts/start_server.sh`)
+4. Flask server running locally (`./scripts/start_server.sh`)
 
-4. Tailscale Funnel active (`tailscale funnel --bg 8443`)
+5. Tailscale Funnel active (`tailscale funnel --bg 8443`)
 
 ## Test 1: Environment Variables
 

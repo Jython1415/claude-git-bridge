@@ -10,18 +10,24 @@ Git bundle proxy enabling Claude.ai Projects to clone repos into their environme
 # Install dependencies
 ./scripts/setup.sh
 
-# Install Tailscale from Mac App Store and login
+# Install Tailscale (Mac App Store or Homebrew)
+# Login and authenticate
 
 # Start Tailscale Funnel (auto-restarts on boot)
 tailscale funnel --bg 8443
 
-# Auto-start Flask server on login
+# Auto-start Flask server on login (macOS LaunchAgent)
 ./scripts/install_launchagent.sh
 
-# Get your URL
+# Get your stable URL
 tailscale funnel status
 # Example: https://your-machine.tail-abc123.ts.net
 ```
+
+**Notes:**
+- **Tailscale Funnel**: Provides free stable HTTPS URL, auto-restarts on network changes/reboot
+- **LaunchAgent**: Auto-starts Flask server on login via `~/Library/LaunchAgents/com.joshuashew.gitproxy.plist`
+- **Logs**: Server logs to `~/Library/Logs/gitproxy.log` and `~/Library/Logs/gitproxy-error.log`
 
 ### 2. Install Skill in Claude.ai
 
@@ -92,7 +98,6 @@ launchctl load ~/Library/LaunchAgents/com.joshuashew.gitproxy.plist
 ## Documentation
 
 - [CLAUDE.md](CLAUDE.md) - Technical reference
-- [docs/TAILSCALE_SETUP.md](docs/TAILSCALE_SETUP.md) - Detailed Tailscale setup
 - [skill-package/README.md](skill-package/README.md) - Skill installation guide
 
 ## License

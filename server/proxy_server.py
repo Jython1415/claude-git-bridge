@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Git Proxy Server
-Executes git commands on behalf of Claude.ai skills via HTTPS
+Git Bundle Proxy Server
+Provides bundle-based git operations for Claude.ai via HTTPS
+Files are processed in temporary directories and cleaned up immediately
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import subprocess
-import base64
 import os
 import logging
 from datetime import datetime
-from pathlib import Path
+import tempfile
 
 # Load .env file if it exists
 try:
@@ -34,19 +34,6 @@ if not SECRET_KEY:
     logger.warning("PROXY_SECRET_KEY not set! Using insecure default.")
     SECRET_KEY = 'CHANGE-ME-INSECURE'
 
-WORKSPACE_DIR = Path(os.environ.get('GIT_WORKSPACE', os.path.expanduser('~/git-proxy-workspace')))
-WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Request logging
-REQUEST_LOG = WORKSPACE_DIR / 'requests.log'
-
-
-def log_request(endpoint, status, details=''):
-    """Log all requests for audit trail"""
-    with open(REQUEST_LOG, 'a') as f:
-        timestamp = datetime.now().isoformat()
-        f.write(f"{timestamp} | {endpoint} | {status} | {details}\n")
-
 
 def verify_auth(auth_header):
     """Verify authentication token"""
@@ -58,111 +45,243 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'workspace': str(WORKSPACE_DIR),
+        'mode': 'bundle-proxy',
         'timestamp': datetime.now().isoformat()
     })
 
 
-@app.route('/git-exec', methods=['POST'])
-def git_exec():
-    """Execute git command"""
+@app.route('/git/fetch-bundle', methods=['POST'])
+def fetch_bundle():
+    """
+    Clone repository and return as git bundle (temporary operation)
 
+    Input: {"repo_url": "https://github.com/user/repo.git", "branch": "main"}
+    Output: Binary bundle file
+
+    Files are cloned to temporary directory and cleaned up immediately after bundling.
+    """
     # Verify authentication
     auth_key = request.headers.get('X-Auth-Key')
     if not verify_auth(auth_key):
-        log_request('/git-exec', 'UNAUTHORIZED', 'Invalid auth key')
+        logger.warning("Unauthorized fetch-bundle attempt")
         return jsonify({'error': 'unauthorized'}), 401
 
+    repo_url = None
     try:
         data = request.json
+        repo_url = data.get('repo_url')
+        branch = data.get('branch', 'main')
 
-        # Decode command
-        encoded_cmd = data.get('command')
-        if not encoded_cmd:
-            return jsonify({'error': 'missing command'}), 400
+        if not repo_url:
+            return jsonify({'error': 'missing repo_url'}), 400
 
-        cmd = base64.b64decode(encoded_cmd).decode('utf-8')
+        repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
+        logger.info(f"Fetching bundle for {repo_url}")
 
-        # Security: only allow git and gh commands
-        allowed_commands = ('git ', 'gh ')
-        if not cmd.strip().startswith(allowed_commands):
-            log_request('/git-exec', 'FORBIDDEN', f'Disallowed command: {cmd}')
-            return jsonify({'error': 'only git and gh commands allowed'}), 403
+        # Use temporary directory for clone (auto-cleanup)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = os.path.join(temp_dir, repo_name)
 
-        # Get working directory
-        cwd = data.get('cwd', str(WORKSPACE_DIR))
-        cwd_path = Path(cwd)
+            # Clone repository
+            logger.info(f"Cloning {repo_url} to temporary directory")
+            result = subprocess.run(
+                ['git', 'clone', repo_url, repo_path],
+                capture_output=True,
+                timeout=300,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.error(f"Clone failed: {result.stderr}")
+                return jsonify({'error': f'clone failed: {result.stderr}'}), 500
 
-        # Security: ensure cwd is within workspace
-        try:
-            cwd_path.resolve().relative_to(WORKSPACE_DIR.resolve())
-        except ValueError:
-            # If cwd is not relative to workspace, use workspace
-            cwd_path = WORKSPACE_DIR
+            # Create bundle file
+            bundle_file = tempfile.NamedTemporaryFile(delete=False, suffix='.bundle')
+            bundle_path = bundle_file.name
+            bundle_file.close()
 
-        # Ensure directory exists
-        cwd_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Creating bundle")
+            result = subprocess.run(
+                ['git', 'bundle', 'create', bundle_path, '--all'],
+                cwd=repo_path,
+                capture_output=True,
+                timeout=60,
+                text=True
+            )
 
-        logger.info(f"Executing: {cmd} in {cwd_path}")
-        log_request('/git-exec', 'EXECUTING', cmd)
+            if result.returncode != 0:
+                logger.error(f"Bundle creation failed: {result.stderr}")
+                os.unlink(bundle_path)
+                return jsonify({'error': f'bundle creation failed: {result.stderr}'}), 500
 
-        # Execute command
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            timeout=60,
-            cwd=str(cwd_path)
-        )
+            logger.info(f"Bundle created successfully, temp repo cleaned up")
 
-        # Encode results
-        response = {
-            'stdout': base64.b64encode(result.stdout).decode('utf-8'),
-            'stderr': base64.b64encode(result.stderr).decode('utf-8'),
-            'returncode': result.returncode
-        }
-
-        log_request('/git-exec', 'SUCCESS', f'returncode={result.returncode}')
-        return jsonify(response)
+            # Return bundle file (temp bundle file will be cleaned up by Flask after sending)
+            return send_file(
+                bundle_path,
+                mimetype='application/octet-stream',
+                as_attachment=True,
+                download_name=f'{repo_name}.bundle'
+            )
 
     except subprocess.TimeoutExpired:
-        log_request('/git-exec', 'TIMEOUT', cmd)
-        return jsonify({'error': 'command timeout'}), 408
+        logger.error(f"Timeout while fetching bundle for {repo_url}")
+        return jsonify({'error': 'operation timeout'}), 408
 
     except Exception as e:
-        logger.error(f"Error executing command: {e}")
-        log_request('/git-exec', 'ERROR', str(e))
+        logger.error(f"Error creating bundle: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/workspace/list', methods=['GET'])
-def list_workspace():
-    """List repositories in workspace"""
+@app.route('/git/push-bundle', methods=['POST'])
+def push_bundle():
+    """
+    Apply bundle and push to GitHub (temporary operation)
 
+    Input:
+        - bundle file (multipart/form-data)
+        - repo_url (form field)
+        - branch (form field)
+        - create_pr (optional, form field: "true"/"false")
+        - pr_title (optional, form field)
+        - pr_body (optional, form field)
+    Output: {"status": "success", "branch": "...", "pr_url": "..." (if created)}
+
+    Files are cloned to temporary directory and cleaned up immediately after pushing.
+    """
     # Verify authentication
     auth_key = request.headers.get('X-Auth-Key')
     if not verify_auth(auth_key):
+        logger.warning("Unauthorized push-bundle attempt")
         return jsonify({'error': 'unauthorized'}), 401
 
-    try:
-        repos = []
-        for item in WORKSPACE_DIR.iterdir():
-            if item.is_dir() and (item / '.git').exists():
-                repos.append({
-                    'name': item.name,
-                    'path': str(item)
-                })
+    repo_url = None
+    branch = None
+    temp_bundle_path = None
 
-        return jsonify({'repositories': repos})
+    try:
+        # Get form data
+        repo_url = request.form.get('repo_url')
+        branch = request.form.get('branch')
+        create_pr = request.form.get('create_pr', 'false').lower() == 'true'
+        pr_title = request.form.get('pr_title', '')
+        pr_body = request.form.get('pr_body', '')
+
+        if not repo_url or not branch:
+            return jsonify({'error': 'missing repo_url or branch'}), 400
+
+        # Get bundle file
+        if 'bundle' not in request.files:
+            return jsonify({'error': 'missing bundle file'}), 400
+
+        bundle_file = request.files['bundle']
+
+        # Save bundle to temp file
+        temp_bundle = tempfile.NamedTemporaryFile(delete=False, suffix='.bundle')
+        temp_bundle_path = temp_bundle.name
+        bundle_file.save(temp_bundle_path)
+        temp_bundle.close()
+
+        logger.info(f"Pushing bundle for {repo_url}, branch {branch}")
+
+        repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
+
+        # Use temporary directory for all operations
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = os.path.join(temp_dir, repo_name)
+
+            # Clone repository
+            logger.info(f"Cloning {repo_url} to temporary directory")
+            result = subprocess.run(
+                ['git', 'clone', repo_url, repo_path],
+                capture_output=True,
+                timeout=300,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.error(f"Clone failed: {result.stderr}")
+                return jsonify({'error': f'clone failed: {result.stderr}'}), 500
+
+            # Fetch bundle into repository
+            logger.info(f"Fetching bundle into {branch}")
+            result = subprocess.run(
+                ['git', 'fetch', temp_bundle_path, f'{branch}:{branch}'],
+                cwd=repo_path,
+                capture_output=True,
+                timeout=60,
+                text=True
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Bundle fetch failed: {result.stderr}")
+                return jsonify({'error': f'bundle fetch failed: {result.stderr}'}), 500
+
+            # Push branch to remote
+            logger.info(f"Pushing {branch} to origin")
+            result = subprocess.run(
+                ['git', 'push', 'origin', branch],
+                cwd=repo_path,
+                capture_output=True,
+                timeout=60,
+                text=True
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Push failed: {result.stderr}")
+                return jsonify({'error': f'push failed: {result.stderr}'}), 500
+
+            response = {
+                'status': 'success',
+                'branch': branch,
+                'message': f'Branch {branch} pushed successfully'
+            }
+
+            # Create PR if requested
+            if create_pr:
+                logger.info(f"Creating PR for {branch}")
+
+                if not pr_title:
+                    pr_title = f"Changes from {branch}"
+
+                gh_cmd = ['gh', 'pr', 'create', '--title', pr_title, '--body', pr_body or 'Automated PR from Claude', '--head', branch]
+
+                result = subprocess.run(
+                    gh_cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    timeout=60,
+                    text=True
+                )
+
+                if result.returncode == 0:
+                    pr_url = result.stdout.strip()
+                    response['pr_created'] = True
+                    response['pr_url'] = pr_url
+                    logger.info(f"PR created: {pr_url}")
+                else:
+                    logger.warning(f"PR creation failed: {result.stderr}")
+                    response['pr_created'] = False
+                    response['pr_error'] = result.stderr
+
+            logger.info(f"Push complete, temp repo cleaned up")
+            return jsonify(response)
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Timeout while pushing bundle for {repo_url} {branch}")
+        return jsonify({'error': 'operation timeout'}), 408
 
     except Exception as e:
-        logger.error(f"Error listing workspace: {e}")
+        logger.error(f"Error pushing bundle: {e}")
         return jsonify({'error': str(e)}), 500
+
+    finally:
+        # Clean up temp bundle file
+        if temp_bundle_path and os.path.exists(temp_bundle_path):
+            os.unlink(temp_bundle_path)
 
 
 if __name__ == '__main__':
-    logger.info(f"Starting Git Proxy Server")
-    logger.info(f"Workspace: {WORKSPACE_DIR}")
+    logger.info(f"Starting Git Bundle Proxy Server")
+    logger.info(f"Mode: Temporary operations (no persistent storage)")
     logger.info(f"Secret key configured: {bool(os.environ.get('PROXY_SECRET_KEY'))}")
 
     # Run server

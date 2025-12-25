@@ -1,7 +1,6 @@
 ---
-name: Git Proxy
+name: git-proxy
 description: Execute git operations through a secure proxy server. Use when you need to clone, commit, push, pull, or manage git repositories from Claude.ai Projects.
-dependencies: python>=3.7, requests>=2.31.0
 ---
 
 # Git Proxy Skill
@@ -19,61 +18,44 @@ GIT_PROXY_KEY=your-secret-authentication-key
 
 ## Quick Start
 
+Clone repos into Claude's environment using git bundles:
+
 ```python
 from git_client import GitProxyClient
+import subprocess
 
-# Initialize client (reads from .env automatically)
+# Initialize client
 client = GitProxyClient()
 
-# Clone a repository
-repo_path = client.clone('https://github.com/username/repo.git')
+# 1. Fetch repository as bundle
+client.fetch_bundle('https://github.com/user/repo.git', 'repo.bundle')
 
-# Check status
-status = client.status(repo_path)
-print(status)
+# 2. Clone bundle locally in Claude's environment
+subprocess.run(['git', 'clone', 'repo.bundle', 'repo/'])
+subprocess.run(['git', 'remote', 'set-url', 'origin', 'https://github.com/user/repo.git'], cwd='repo/')
 
-# Make changes, then commit
-client.commit(repo_path, "Your commit message here")
+# 3. Edit files using normal file operations
+with open('repo/README.md', 'a') as f:
+    f.write('\nImprovement from Claude\n')
 
-# Push to remote
-client.push(repo_path, branch='main')
-```
+# 4. Commit changes
+subprocess.run(['git', 'add', '.'], cwd='repo/')
+subprocess.run(['git', 'commit', '-m', 'Improvements from Claude'], cwd='repo/')
 
-## Common Operations
+# 5. Create feature branch and bundle changes
+subprocess.run(['git', 'checkout', '-b', 'feature/claude-improvements'], cwd='repo/')
+subprocess.run(['git', 'bundle', 'create', 'changes.bundle', 'main..HEAD'], cwd='repo/')
 
-### Clone Repository
-```python
-repo = client.clone('https://github.com/user/repo.git')
-```
-
-### Check Status
-```python
-status = client.status(repo)
-```
-
-### Create Branch
-```python
-client.branch(repo, 'feature-branch', checkout=True)
-```
-
-### Commit Changes
-```python
-client.commit(repo, "Describe your changes")
-```
-
-### Push to Remote
-```python
-client.push(repo, branch='main')
-```
-
-### Pull Latest
-```python
-client.pull(repo)
-```
-
-### View History
-```python
-log = client.log(repo, n=10)
+# 6. Push bundle and create PR
+result = client.push_bundle(
+    'changes.bundle',
+    'https://github.com/user/repo.git',
+    'feature/claude-improvements',
+    create_pr=True,
+    pr_title='Improvements from Claude',
+    pr_body='Automated improvements'
+)
+print(f"PR created: {result.get('pr_url')}")
 ```
 
 ## API Reference
@@ -81,16 +63,8 @@ log = client.log(repo, n=10)
 ### GitProxyClient Methods
 
 - `health_check()` - Verify proxy server is reachable
-- `clone(repo_url, local_path=None)` - Clone a repository
-- `status(repo_path, short=True)` - Get repository status
-- `add(repo_path, files="-A")` - Stage files
-- `commit(repo_path, message, files=None)` - Commit changes
-- `push(repo_path, branch='main', remote='origin')` - Push to remote
-- `pull(repo_path, branch='main', remote='origin')` - Pull from remote
-- `log(repo_path, n=10, oneline=True)` - View commit history
-- `branch(repo_path, branch_name=None, checkout=False)` - Manage branches
-- `checkout(repo_path, branch)` - Switch branches
-- `list_workspace()` - List all repositories in workspace
+- `fetch_bundle(repo_url, output_path, branch='main')` - Fetch repository as bundle for local cloning
+- `push_bundle(bundle_path, repo_url, branch, create_pr=False, pr_title='', pr_body='')` - Push bundled changes and optionally create PR
 
 ## Troubleshooting
 
@@ -104,14 +78,15 @@ log = client.log(repo, n=10)
 - Verify `GIT_PROXY_KEY` matches the secret key on your proxy server
 - Check server logs for authentication attempts
 
-### Command Failures
-- All commands must start with `git ` (enforced by proxy for security)
-- Ensure you're in a valid git repository path
+### Bundle Failures
+- Ensure bundle files are valid git bundles
+- Check bundle with: `git bundle verify bundle.file`
 - Check server logs: `tail -f ~/Library/Logs/gitproxy.log`
 
 ## Security Notes
 
-- All git commands are executed through an authenticated proxy
-- The proxy server validates all commands before execution
-- Commands are restricted to workspace directory only
+- All operations require authentication via secret key
+- Files are processed in temporary directories with automatic cleanup
+- No persistent storage on proxy server (pure pass-through)
 - Full audit trail maintained in server logs
+- PR creation uses your local git credentials and gh CLI configuration

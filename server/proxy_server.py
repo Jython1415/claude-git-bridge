@@ -262,6 +262,19 @@ def push_bundle():
                     response['pr_created'] = False
                     response['pr_error'] = result.stderr
 
+                    # Provide manual PR URL for common errors
+                    if 'gh' in result.stderr or 'command not found' in result.stderr:
+                        # Extract owner/repo from URL
+                        try:
+                            repo_parts = repo_url.rstrip('/').replace('.git', '').split('/')
+                            owner = repo_parts[-2]
+                            repo = repo_parts[-1]
+                            manual_url = f"https://github.com/{owner}/{repo}/pull/new/{branch}"
+                            response['manual_pr_url'] = manual_url
+                            response['pr_message'] = f"GitHub CLI not available. Create PR manually at: {manual_url}"
+                        except:
+                            pass
+
             logger.info(f"Push complete, temp repo cleaned up")
             return jsonify(response)
 

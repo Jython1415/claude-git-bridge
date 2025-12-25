@@ -41,10 +41,12 @@ with open('/mnt/project/_env', 'r') as f:
             os.environ[key] = value
 ```
 
-**PR Creation Requirements:**
-- Automatic PR creation (`create_pr=True`) requires GitHub CLI (`gh`) installed on proxy server
-- If `gh` not available, use `create_pr=False` and create PR manually at:
-  `https://github.com/user/repo/pull/new/branch-name`
+**PR Creation:**
+- Automatic PR creation (`create_pr=True`) uses GitHub CLI (`gh`) on your proxy server
+- Server auto-detects `gh` at startup (checks `/opt/homebrew/bin/gh` and `/usr/local/bin/gh`)
+- If `gh` is available, PRs are created automatically
+- If `gh` not found, server provides manual PR URL in response
+- Check server logs on startup to verify `gh` was detected
 
 ## Quick Start (Easy Mode)
 

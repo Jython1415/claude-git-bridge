@@ -2,6 +2,19 @@
 
 All notable changes to the git-proxy skill will be documented in this file.
 
+## [1.2.1] - 2024-12-25
+
+### Fixed
+- **Prominent import fix**: Added explicit copy command at top of setup instructions to avoid import errors
+- Made import workaround the first step in Quick Start example
+
+### Improved
+- **51.6% token reduction**: Reduced SKILL.md from 1089 to 527 words (265 to 161 lines)
+- Consolidated redundant sections (removed duplicate workflow examples)
+- Streamlined troubleshooting with concise Q&A format
+- Removed verbose explanations while keeping all essential information
+- Reorganized for faster scanning
+
 ## [1.2.0] - 2024-12-25
 
 ### Added

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Git Bundle Proxy Server
-Provides bundle-based git operations for Claude.ai via HTTPS
-Files are processed in temporary directories and cleaned up immediately
+Credential Proxy Server
+
+Provides:
+- Git bundle operations for Claude.ai
+- Session-based authentication
+- Transparent credential proxying to upstream APIs
+
+All file operations use temporary directories with automatic cleanup.
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -12,6 +17,11 @@ import logging
 from datetime import datetime
 import tempfile
 import shutil
+
+# Local modules
+from sessions import SessionStore
+from credentials import CredentialStore
+from proxy import forward_request
 
 # Load .env file if it exists
 try:
@@ -49,10 +59,36 @@ if GH_PATH:
 else:
     logger.warning("GitHub CLI (gh) not found - PR creation will fail")
 
+# Initialize session and credential stores
+session_store = SessionStore()
+credential_store = CredentialStore()
+
+logger.info(f"Loaded {len(credential_store.list_services())} service(s) from credential store")
+
 
 def verify_auth(auth_header):
-    """Verify authentication token"""
+    """Verify legacy authentication token (X-Auth-Key)"""
     return auth_header == SECRET_KEY
+
+
+def verify_session_or_key(service: str = 'git') -> bool:
+    """
+    Verify request has valid session (with service access) OR legacy auth key.
+
+    Args:
+        service: The service to check access for (default 'git')
+
+    Returns:
+        True if authorized, False otherwise
+    """
+    # Try session-based auth first
+    session_id = request.headers.get('X-Session-Id')
+    if session_id and session_store.has_service(session_id, service):
+        return True
+
+    # Fall back to legacy key-based auth
+    auth_key = request.headers.get('X-Auth-Key')
+    return verify_auth(auth_key)
 
 
 @app.route('/health', methods=['GET'])
@@ -60,10 +96,126 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'mode': 'bundle-proxy',
-        'timestamp': datetime.now().isoformat()
+        'mode': 'credential-proxy',
+        'timestamp': datetime.now().isoformat(),
+        'services': credential_store.list_services(),
+        'active_sessions': session_store.count()
     })
 
+
+# =============================================================================
+# Session Management Endpoints
+# =============================================================================
+
+@app.route('/sessions', methods=['POST'])
+def create_session():
+    """
+    Create a new session granting access to specified services.
+
+    Input: {"services": ["bsky", "github", "git"], "ttl_minutes": 30}
+    Output: {"session_id": "...", "proxy_url": "...", "expires_in_minutes": 30, "services": [...]}
+    """
+    data = request.json or {}
+    services = data.get('services', [])
+    ttl_minutes = data.get('ttl_minutes', 30)
+
+    if not services:
+        return jsonify({'error': 'services list is required'}), 400
+
+    if not isinstance(services, list):
+        return jsonify({'error': 'services must be a list'}), 400
+
+    # Validate services exist (git is always valid as pseudo-service)
+    available = set(credential_store.list_services()) | {'git'}
+    invalid = set(services) - available
+    if invalid:
+        return jsonify({
+            'error': f'unknown services: {list(invalid)}',
+            'available': sorted(available)
+        }), 400
+
+    session = session_store.create(services, ttl_minutes)
+
+    # Build proxy URL from request host
+    scheme = 'https' if request.is_secure else 'http'
+    proxy_url = f"{scheme}://{request.host}"
+
+    logger.info(f"Created session {session.session_id[:8]}... for services: {services}")
+
+    return jsonify({
+        'session_id': session.session_id,
+        'proxy_url': proxy_url,
+        'expires_in_minutes': ttl_minutes,
+        'services': services
+    })
+
+
+@app.route('/sessions/<session_id>', methods=['DELETE'])
+def revoke_session(session_id: str):
+    """Revoke a session."""
+    if session_store.revoke(session_id):
+        logger.info(f"Revoked session {session_id[:8]}...")
+        return jsonify({'status': 'revoked'})
+    return jsonify({'error': 'session not found'}), 404
+
+
+@app.route('/services', methods=['GET'])
+def list_services():
+    """List available services that can be included in sessions."""
+    services = credential_store.list_services()
+    # Always include 'git' as a pseudo-service
+    if 'git' not in services:
+        services = services + ['git']
+    return jsonify({'services': sorted(services)})
+
+
+# =============================================================================
+# Transparent Proxy Endpoint
+# =============================================================================
+
+@app.route('/proxy/<service>/<path:rest>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+def proxy_request(service: str, rest: str):
+    """
+    Transparent proxy to upstream service.
+
+    Requires valid X-Session-Id header with access to the service.
+    Forwards request with credentials injected based on service config.
+    """
+    # Reject 'git' as a proxy service (it's not an upstream API)
+    if service == 'git':
+        return jsonify({
+            'error': 'git is not a proxy service',
+            'hint': 'Use /git/fetch-bundle or /git/push-bundle for git operations'
+        }), 400
+
+    session_id = request.headers.get('X-Session-Id')
+    if not session_id:
+        return jsonify({'error': 'missing X-Session-Id header'}), 401
+
+    session = session_store.get(session_id)
+    if session is None:
+        return jsonify({'error': 'invalid or expired session'}), 401
+
+    if not session.has_service(service):
+        return jsonify({
+            'error': f'session does not have access to {service}',
+            'session_services': session.services
+        }), 403
+
+    return forward_request(
+        service=service,
+        path=rest,
+        method=request.method,
+        headers=dict(request.headers),
+        body=request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None,
+        query_string=request.query_string.decode(),
+        credential_store=credential_store
+    )
+
+
+# =============================================================================
+# Git Bundle Endpoints
+# =============================================================================
 
 @app.route('/git/fetch-bundle', methods=['POST'])
 def fetch_bundle():
@@ -74,10 +226,11 @@ def fetch_bundle():
     Output: Binary bundle file
 
     Files are cloned to temporary directory and cleaned up immediately after bundling.
+
+    Authentication: X-Session-Id (with 'git' service) OR X-Auth-Key
     """
-    # Verify authentication
-    auth_key = request.headers.get('X-Auth-Key')
-    if not verify_auth(auth_key):
+    # Verify authentication (session or legacy key)
+    if not verify_session_or_key('git'):
         logger.warning("Unauthorized fetch-bundle attempt")
         return jsonify({'error': 'unauthorized'}), 401
 
@@ -162,10 +315,11 @@ def push_bundle():
     Output: {"status": "success", "branch": "...", "pr_url": "..." (if created)}
 
     Files are cloned to temporary directory and cleaned up immediately after pushing.
+
+    Authentication: X-Session-Id (with 'git' service) OR X-Auth-Key
     """
-    # Verify authentication
-    auth_key = request.headers.get('X-Auth-Key')
-    if not verify_auth(auth_key):
+    # Verify authentication (session or legacy key)
+    if not verify_session_or_key('git'):
         logger.warning("Unauthorized push-bundle attempt")
         return jsonify({'error': 'unauthorized'}), 401
 
@@ -320,9 +474,10 @@ def push_bundle():
 
 
 if __name__ == '__main__':
-    logger.info(f"Starting Git Bundle Proxy Server")
-    logger.info(f"Mode: Temporary operations (no persistent storage)")
-    logger.info(f"Secret key configured: {bool(os.environ.get('PROXY_SECRET_KEY'))}")
+    logger.info("Starting Credential Proxy Server")
+    logger.info("Mode: Session-based auth + transparent credential proxy")
+    logger.info(f"Legacy auth key configured: {bool(os.environ.get('PROXY_SECRET_KEY'))}")
+    logger.info(f"Services available: {credential_store.list_services() + ['git']}")
 
     # Run server
     app.run(

@@ -1,0 +1,166 @@
+"""
+Transparent Proxy for Credential Proxy
+
+Forwards requests to upstream services with credential injection.
+Streams responses back to avoid buffering large payloads.
+"""
+
+import logging
+import requests
+from flask import Response, stream_with_context
+from typing import Optional
+
+from credentials import CredentialStore
+
+logger = logging.getLogger(__name__)
+
+# Headers that should not be forwarded (hop-by-hop headers)
+HOP_BY_HOP_HEADERS = {
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'host',
+    # Also exclude our custom auth headers
+    'x-session-id',
+    'x-auth-key',
+}
+
+# Response headers that should not be forwarded back
+EXCLUDED_RESPONSE_HEADERS = {
+    'connection',
+    'keep-alive',
+    'transfer-encoding',
+    'content-encoding',  # Let Flask handle encoding
+    'content-length',    # Will be recalculated
+}
+
+
+def filter_request_headers(headers: dict) -> dict:
+    """
+    Filter out hop-by-hop and internal headers from request.
+
+    Args:
+        headers: Original request headers
+
+    Returns:
+        Filtered headers dict
+    """
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in HOP_BY_HOP_HEADERS
+    }
+
+
+def filter_response_headers(headers: dict) -> dict:
+    """
+    Filter response headers for forwarding back to client.
+
+    Args:
+        headers: Upstream response headers
+
+    Returns:
+        Filtered headers dict
+    """
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in EXCLUDED_RESPONSE_HEADERS
+    }
+
+
+def forward_request(
+    service: str,
+    path: str,
+    method: str,
+    headers: dict,
+    body: Optional[bytes],
+    query_string: str,
+    credential_store: CredentialStore
+) -> Response:
+    """
+    Forward a request to an upstream service with credential injection.
+
+    Args:
+        service: Service name to forward to
+        path: URL path after the service base URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Request headers
+        body: Request body (if any)
+        query_string: Query string from original request
+        credential_store: CredentialStore instance for credential lookup
+
+    Returns:
+        Flask Response object with streamed upstream response
+    """
+    # Get service credentials
+    cred = credential_store.get(service)
+    if cred is None:
+        logger.warning(f"Unknown service requested: {service}")
+        return Response(
+            f'{{"error": "unknown service: {service}"}}',
+            status=404,
+            mimetype='application/json'
+        )
+
+    # Build target URL
+    base_url = cred.base_url.rstrip('/')
+    target_url = f"{base_url}/{path}"
+    if query_string:
+        target_url = f"{target_url}?{query_string}"
+
+    # Filter and prepare headers
+    forward_headers = filter_request_headers(headers)
+
+    # Inject authentication
+    forward_headers, target_url = cred.inject_auth(forward_headers, target_url)
+
+    logger.info(f"Proxying {method} {service}/{path}")
+
+    try:
+        # Make upstream request with streaming
+        upstream_resp = requests.request(
+            method=method,
+            url=target_url,
+            headers=forward_headers,
+            data=body,
+            stream=True,
+            timeout=60
+        )
+
+        # Stream response back
+        response_headers = filter_response_headers(dict(upstream_resp.headers))
+
+        return Response(
+            stream_with_context(upstream_resp.iter_content(chunk_size=8192)),
+            status=upstream_resp.status_code,
+            headers=response_headers,
+            content_type=upstream_resp.headers.get('Content-Type', 'application/octet-stream')
+        )
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout proxying to {service}/{path}")
+        return Response(
+            '{"error": "upstream timeout"}',
+            status=504,
+            mimetype='application/json'
+        )
+
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error proxying to {service}/{path}: {e}")
+        return Response(
+            '{"error": "upstream connection failed"}',
+            status=502,
+            mimetype='application/json'
+        )
+
+    except Exception as e:
+        logger.error(f"Error proxying to {service}/{path}: {e}")
+        return Response(
+            f'{{"error": "proxy error: {str(e)}"}}',
+            status=500,
+            mimetype='application/json'
+        )

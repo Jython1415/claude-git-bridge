@@ -12,22 +12,49 @@ from typing import Optional
 class GitProxyClient:
     """Client for communicating with git bundle proxy server"""
 
-    def __init__(self, proxy_url: Optional[str] = None, auth_key: Optional[str] = None):
+    def __init__(
+        self,
+        proxy_url: Optional[str] = None,
+        auth_key: Optional[str] = None,
+        session_id: Optional[str] = None
+    ):
         """
         Initialize git proxy client
 
+        Authentication priority:
+        1. session_id (if provided or SESSION_ID env var) - new session-based auth
+        2. auth_key (if provided or GIT_PROXY_KEY env var) - legacy key-based auth
+
         Args:
-            proxy_url: URL of proxy server (or set GIT_PROXY_URL env var)
+            proxy_url: URL of proxy server (or set GIT_PROXY_URL/PROXY_URL env var)
             auth_key: Authentication key (or set GIT_PROXY_KEY env var)
+            session_id: Session ID for session-based auth (or set SESSION_ID env var)
         """
-        self.proxy_url = proxy_url or os.environ.get('GIT_PROXY_URL')
+        self.proxy_url = (
+            proxy_url or
+            os.environ.get('GIT_PROXY_URL') or
+            os.environ.get('PROXY_URL')
+        )
+        self.session_id = session_id or os.environ.get('SESSION_ID')
         self.auth_key = auth_key or os.environ.get('GIT_PROXY_KEY')
 
-        if not self.proxy_url or not self.auth_key:
+        if not self.proxy_url:
             raise ValueError(
-                "Missing proxy_url or auth_key. "
-                "Set GIT_PROXY_URL and GIT_PROXY_KEY environment variables."
+                "Missing proxy_url. "
+                "Set GIT_PROXY_URL or PROXY_URL environment variable."
             )
+
+        if not self.session_id and not self.auth_key:
+            raise ValueError(
+                "Missing authentication. "
+                "Set SESSION_ID (for session auth) or GIT_PROXY_KEY (for key auth)."
+            )
+
+    def _auth_headers(self) -> dict:
+        """Get authentication headers based on available credentials"""
+        if self.session_id:
+            return {'X-Session-Id': self.session_id}
+        return {'X-Auth-Key': self.auth_key}
 
     def health_check(self) -> dict:
         """Check proxy server health"""
@@ -53,7 +80,7 @@ class GitProxyClient:
         response = requests.post(
             f'{self.proxy_url}/git/fetch-bundle',
             json={'repo_url': repo_url, 'branch': branch},
-            headers={'X-Auth-Key': self.auth_key},
+            headers=self._auth_headers(),
             timeout=600  # Larger repos may take time
         )
 
@@ -106,7 +133,7 @@ class GitProxyClient:
                 f'{self.proxy_url}/git/push-bundle',
                 files=files,
                 data=data,
-                headers={'X-Auth-Key': self.auth_key},
+                headers=self._auth_headers(),
                 timeout=600
             )
 

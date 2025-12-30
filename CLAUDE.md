@@ -1,116 +1,152 @@
-# Claude Git Bridge - Technical Reference
+# Claude Credential Proxy - Technical Reference
 
 ## Project Purpose
-Git bundle proxy enabling Claude.ai to clone repositories into its own environment via temporary operations on your Mac.
+
+Credential proxy enabling Claude.ai to access APIs and clone repositories without exposing credentials. Credentials stay on your Mac; Claude only gets time-limited session tokens.
 
 ## Architecture
-- **Server**: `server/proxy_server.py` - Flask app, bundle operations, temporary storage only
-- **Client**: `skill-package/git-proxy/git_client.py` - Python client in Claude.ai skill
-- **Auth**: Token-based via `X-Auth-Key` header
-- **Storage**: Temporary directories only (auto-cleanup)
+
+```
+Claude.ai
+    │
+    ├── MCP Custom Connector (port 8001, Streamable HTTP)
+    │       └── FastMCP server calling Flask API
+    │
+    └── Flask Proxy Server (port 8443)
+            ├── /sessions     → Session management
+            ├── /services     → List available services
+            ├── /proxy/<svc>  → Transparent credential proxy
+            └── /git/*        → Git bundle operations
+```
 
 ## Key Files
 
-### Server (`server/proxy_server.py`)
-- Endpoints: `/health`, `/git/fetch-bundle`, `/git/push-bundle`
-- Security: Validates auth, uses temp directories with auto-cleanup
-- Logging: Python logger (no persistent log files)
-- Config: Env vars `PROXY_SECRET_KEY`, `PORT`, `DEBUG`
+### Server (`server/`)
+- `proxy_server.py` - Main Flask app with all endpoints
+- `sessions.py` - In-memory session store with TTL
+- `credentials.py` - Loads service configs from JSON
+- `proxy.py` - Transparent HTTP forwarding with credential injection
+- `credentials.json` - Your API credentials (gitignored)
 
-### Client (`skill-package/git-proxy/git_client.py`)
-- `GitProxyClient` class with methods: `health_check()`, `fetch_bundle()`, `push_bundle()`
-- Config: Env vars `GIT_PROXY_URL`, `GIT_PROXY_KEY`
-- Handles bundle download/upload, PR creation
+### MCP Server (`mcp/`)
+- `server.py` - FastMCP server with `create_session`, `revoke_session`, `list_services`
+- Runs on port 8001 with Streamable HTTP transport
 
-### Configuration (`.env`)
-```
-PROXY_SECRET_KEY=<secret>      # Required: auth token
-PORT=8443                      # Optional: server port
-DEBUG=false                    # Optional: debug mode
-```
+### Client (`skill-package/git-proxy/`)
+- `git_client.py` - Python client supporting both session and key auth
 
-**Client .env** (in Claude.ai project):
-```
-GIT_PROXY_URL=https://your-machine.tail-id.ts.net
-GIT_PROXY_KEY=<matches PROXY_SECRET_KEY>
-```
+## Authentication
 
-## Workflow
-
-### Fetch Bundle (Clone into Claude's environment)
+**Session-based (new):**
 ```python
-from git_client import GitProxyClient
-import subprocess
+# MCP creates session
+session = create_session(["bsky", "git"], ttl_minutes=30)
 
-client = GitProxyClient()
-
-# 1. Fetch bundle from proxy
-client.fetch_bundle('https://github.com/user/repo.git', 'repo.bundle')
-
-# 2. Clone in Claude's environment
-subprocess.run(['git', 'clone', 'repo.bundle', 'repo/'])
-subprocess.run(['git', 'remote', 'set-url', 'origin', 'https://github.com/user/repo.git'], cwd='repo/')
+# Scripts use session_id
+headers = {"X-Session-Id": session["session_id"]}
+requests.get(f"{session['proxy_url']}/proxy/bsky/...", headers=headers)
 ```
 
-**On proxy server:**
-- Clones repo to temporary directory
-- Creates git bundle
-- Returns bundle file
-- Deletes temporary directory automatically
-
-### Push Bundle (Push changes from Claude)
+**Legacy key-based (still supported):**
 ```python
-# After editing files and committing in Claude's environment
-subprocess.run(['git', 'checkout', '-b', 'feature/improvements'], cwd='repo/')
-subprocess.run(['git', 'bundle', 'create', 'changes.bundle', 'main..HEAD'], cwd='repo/')
-
-# Push bundle through proxy
-result = client.push_bundle(
-    'changes.bundle',
-    'https://github.com/user/repo.git',
-    'feature/improvements',
-    create_pr=True,
-    pr_title='Improvements from Claude'
-)
-print(result['pr_url'])
+headers = {"X-Auth-Key": os.environ["GIT_PROXY_KEY"]}
 ```
 
-**On proxy server:**
-- Clones repo to temporary directory
-- Applies bundle (fetches branch)
-- Pushes branch to GitHub
-- Creates PR via gh CLI (if requested)
-- Deletes temporary directory automatically
+Git endpoints accept either auth method.
 
-## Security Model
-- Auth token required (401 if missing/invalid)
-- All operations in temporary directories
-- No persistent storage on proxy server
-- Automatic cleanup after each operation
-- Timeout: 300s for clone/bundle, 60s for other operations
-- Logging via Python logger only
+## Endpoints
 
-## Server Lifecycle
-1. Request arrives with auth key
-2. Temporary directory created
-3. Git operations execute
-4. Response returned
-5. Temporary directory automatically deleted
-6. No files persist on disk
+### Session Management
+- `POST /sessions` - Create session with services list
+- `DELETE /sessions/<id>` - Revoke session
+- `GET /services` - List available services
+
+### Transparent Proxy
+- `ANY /proxy/<service>/<path>` - Forward to upstream with credentials
+
+### Git Operations
+- `POST /git/fetch-bundle` - Clone repo, return bundle
+- `POST /git/push-bundle` - Apply bundle, push, create PR
+
+## Configuration
+
+**Server `.env`:**
+```
+PROXY_SECRET_KEY=<legacy-auth-key>
+PORT=8443
+DEBUG=false
+```
+
+**Service Credentials (`server/credentials.json`):**
+```json
+{
+  "bsky": {
+    "base_url": "https://bsky.social/xrpc",
+    "auth_type": "bearer",
+    "credential": "your-app-password"
+  }
+}
+```
+
+## Running Locally
+
+```bash
+# Sync dependencies
+uv sync
+
+# Start Flask server
+uv run python server/proxy_server.py
+
+# Start MCP server (separate terminal)
+FLASK_URL=http://localhost:8443 uv run python mcp/server.py
+```
+
+## LaunchAgent Setup
+
+Both servers auto-start on login via LaunchAgents:
+
+```bash
+# Install (one-time)
+./scripts/setup-launchagents.sh
+
+# Check status
+launchctl list | grep joshuashew
+
+# Logs
+tail -f ~/Library/Logs/credential-proxy.log
+tail -f ~/Library/Logs/mcp-server.log
+```
+
+## Tailscale Funnel
+
+```bash
+# Expose both servers
+tailscale serve --bg --https=8443 http://127.0.0.1:8443
+tailscale serve --bg --https=8001 http://127.0.0.1:8001
+tailscale funnel 8443
+tailscale funnel 8001
+```
 
 ## Dependencies
-- Flask (server)
-- requests (client)
-- Python 3.7+
-- git installed on server machine
-- gh CLI (optional, for PR creation)
 
-## Deployment
-**Tailscale Funnel** (Recommended): Free stable URLs, auto-start on boot
-- URL: `https://<machine>.<tailnet>.ts.net:8443`
-- Setup: `tailscale funnel --bg 8443`
-- Auto-restarts: On reboot, WiFi change, Tailscale restart
-- LaunchAgent: Auto-starts Flask server on login
+Managed via `pyproject.toml` and uv:
+- Flask, requests, python-dotenv (Flask server)
+- mcp[cli], httpx (MCP server)
+- Python 3.10+
 
-## ToS Compliance
-Compliant with Anthropic Usage Policy - equivalent to VPN/ngrok/SSH tunneling for legitimate development.
+## Security Model
+
+- Credentials never leave the proxy server
+- Sessions expire automatically (default 30 min)
+- Sessions grant access to specific services only
+- Tailscale Funnel provides encrypted, authenticated tunnel
+- MCP server is authless (relies on Tailscale network security)
+
+## Service Configuration
+
+Each service in `credentials.json` specifies:
+- `base_url`: API base URL
+- `auth_type`: `bearer`, `header`, or `query`
+- `credential`: The secret token
+- `auth_header`: Custom header name (for `auth_type: header`)
+- `query_param`: Query param name (for `auth_type: query`)

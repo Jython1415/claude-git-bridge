@@ -57,30 +57,34 @@ echo "Syncing dependencies..."
 echo "Dependencies synced."
 echo ""
 
-# Generate MCP auth token if not exists
+# Load and validate GitHub OAuth configuration
 if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
-if [ -z "$MCP_AUTH_TOKEN" ]; then
-    MCP_AUTH_TOKEN=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
-    echo "Generated new MCP_AUTH_TOKEN"
-
-    # Append to .env file
-    if [ -f "$ENV_FILE" ]; then
-        echo "" >> "$ENV_FILE"
-        echo "# MCP Server Authentication" >> "$ENV_FILE"
-        echo "MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN" >> "$ENV_FILE"
-    else
-        echo "# Credential Proxy Configuration" > "$ENV_FILE"
-        echo "MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN" >> "$ENV_FILE"
-    fi
-    echo "Saved to $ENV_FILE"
+# Validate GitHub OAuth configuration
+if [ -z "$GITHUB_CLIENT_ID" ] || [ -z "$GITHUB_CLIENT_SECRET" ]; then
+    echo "ERROR: GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set in .env"
+    echo ""
+    echo "Steps to configure:"
+    echo "1. Go to https://github.com/settings/developers"
+    echo "2. Create new OAuth App with callback: https://ganymede.tail0410a7.ts.net:10000/oauth/callback"
+    echo "3. Add to .env file:"
+    echo "   GITHUB_CLIENT_ID=your-client-id"
+    echo "   GITHUB_CLIENT_SECRET=your-client-secret"
+    echo "   GITHUB_ALLOWED_USERS=Jython1415"
+    echo "   BASE_URL=https://ganymede.tail0410a7.ts.net:10000"
+    exit 1
 fi
 
-echo ""
-echo "MCP Auth Token: $MCP_AUTH_TOKEN"
-echo "(Use this as authorization_token in Claude.ai custom connector)"
+if [ -z "$GITHUB_ALLOWED_USERS" ]; then
+    echo "WARNING: GITHUB_ALLOWED_USERS not set. No users will be allowed access!"
+    echo "Add to .env file: GITHUB_ALLOWED_USERS=Jython1415"
+fi
+
+echo "GitHub OAuth Configuration:"
+echo "  Client ID: $GITHUB_CLIENT_ID"
+echo "  Allowed Users: $GITHUB_ALLOWED_USERS"
 echo ""
 
 # Ensure LaunchAgents directory exists
@@ -137,10 +141,10 @@ cat > "$PROXY_PLIST" << EOF
     <true/>
 
     <key>StandardOutPath</key>
-    <string>$LOGS_DIR/credential-proxy.log</string>
+    <string>$LOGS_DIR/com.joshuashew.credential-proxy.log</string>
 
     <key>StandardErrorPath</key>
-    <string>$LOGS_DIR/credential-proxy-error.log</string>
+    <string>$LOGS_DIR/com.joshuashew.credential-proxy.error.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -200,10 +204,10 @@ cat > "$MCP_PLIST" << EOF
     <true/>
 
     <key>StandardOutPath</key>
-    <string>$LOGS_DIR/mcp-server.log</string>
+    <string>$LOGS_DIR/com.joshuashew.mcp-server.log</string>
 
     <key>StandardErrorPath</key>
-    <string>$LOGS_DIR/mcp-server-error.log</string>
+    <string>$LOGS_DIR/com.joshuashew.mcp-server.error.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -213,8 +217,14 @@ cat > "$MCP_PLIST" << EOF
         <string>http://localhost:$PROXY_PORT</string>
         <key>MCP_PORT</key>
         <string>$MCP_PORT</string>
-        <key>MCP_AUTH_TOKEN</key>
-        <string>$MCP_AUTH_TOKEN</string>
+        <key>GITHUB_CLIENT_ID</key>
+        <string>$GITHUB_CLIENT_ID</string>
+        <key>GITHUB_CLIENT_SECRET</key>
+        <string>$GITHUB_CLIENT_SECRET</string>
+        <key>GITHUB_ALLOWED_USERS</key>
+        <string>$GITHUB_ALLOWED_USERS</string>
+        <key>BASE_URL</key>
+        <string>https://ganymede.tail0410a7.ts.net:$MCP_PORT</string>
     </dict>
 </dict>
 </plist>
@@ -263,14 +273,20 @@ echo "  $PROXY_PLIST"
 echo "  $MCP_PLIST"
 echo ""
 echo "Logs:"
-echo "  tail -f ~/Library/Logs/credential-proxy.log"
-echo "  tail -f ~/Library/Logs/mcp-server.log"
+echo "  tail -f ~/Library/Logs/com.joshuashew.credential-proxy.log"
+echo "  tail -f ~/Library/Logs/com.joshuashew.mcp-server.log"
 echo ""
 echo "Claude.ai Custom Connector:"
 # Get Tailscale hostname
-TS_HOSTNAME=$(tailscale status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || echo "<your-machine>.<tailnet>.ts.net")
+TS_HOSTNAME=$(tailscale status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || echo "ganymede.tail0410a7.ts.net")
+echo "  Name: Credential Proxy"
 echo "  URL: https://$TS_HOSTNAME:$MCP_PORT/mcp"
-echo "  Authorization Token: $MCP_AUTH_TOKEN"
+echo ""
+echo "Advanced Settings (OAuth):"
+echo "  OAuth Client ID: $GITHUB_CLIENT_ID"
+echo "  OAuth Client Secret: (from .env)"
+echo ""
+echo "Allowed GitHub Users: $GITHUB_ALLOWED_USERS"
 echo ""
 echo "Status commands:"
 echo "  launchctl list | grep joshuashew"

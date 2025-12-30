@@ -1,27 +1,65 @@
 """
 Credential Store for Credential Proxy
 
-Loads service credentials from a JSON configuration file.
-Provides credential injection for proxied requests.
+Service-aware credential handling with built-in support for:
+- ATProto (Bluesky): Automatic session management with identifier + app_password
+- Bearer token APIs: Simple token injection
+- Git: Pseudo-service using local git/gh CLI (no credentials needed)
 """
 
 import json
 import os
 import logging
-from dataclasses import dataclass
-from typing import Literal, Optional
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+from datetime import datetime, timedelta
+
+import requests
 
 logger = logging.getLogger(__name__)
+
+
+# Known service configurations (base URLs, auth flows)
+KNOWN_SERVICES = {
+    "bsky": {
+        "base_url": "https://bsky.social/xrpc",
+        "type": "atproto"
+    },
+    "github_api": {
+        "base_url": "https://api.github.com",
+        "type": "bearer"
+    }
+}
+
+
+@dataclass
+class ATProtoSession:
+    """Cached ATProto session with access and refresh tokens."""
+    access_jwt: str
+    refresh_jwt: str
+    did: str
+    handle: str
+    expires_at: datetime
 
 
 @dataclass
 class ServiceCredential:
     """Configuration for a proxied service."""
+    service_type: str  # "atproto", "bearer", "header", "query"
     base_url: str
-    auth_type: Literal["bearer", "header", "query"]
-    credential: str
-    auth_header: Optional[str] = None  # For auth_type="header"
-    query_param: Optional[str] = None  # For auth_type="query"
+
+    # For bearer/header/query types
+    credential: Optional[str] = None
+    auth_header: Optional[str] = None  # For type="header"
+    query_param: Optional[str] = None  # For type="query"
+
+    # For ATProto type
+    identifier: Optional[str] = None
+    app_password: Optional[str] = None
+    _atproto_session: Optional[ATProtoSession] = field(default=None, repr=False)
+    _session_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def inject_auth(self, headers: dict, url: str) -> tuple[dict, str]:
         """
@@ -36,35 +74,134 @@ class ServiceCredential:
         """
         headers = dict(headers)  # Copy to avoid modifying original
 
-        if self.auth_type == "bearer":
-            headers["Authorization"] = f"Bearer {self.credential}"
+        if self.service_type == "atproto":
+            # Get or refresh ATProto session token
+            token = self._get_atproto_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            else:
+                logger.error("Failed to get ATProto session token")
 
-        elif self.auth_type == "header":
+        elif self.service_type == "bearer":
+            if self.credential:
+                headers["Authorization"] = f"Bearer {self.credential}"
+
+        elif self.service_type == "header":
             header_name = self.auth_header or "X-API-Key"
-            headers[header_name] = self.credential
+            if self.credential:
+                headers[header_name] = self.credential
 
-        elif self.auth_type == "query":
+        elif self.service_type == "query":
             param_name = self.query_param or "api_key"
-            separator = "&" if "?" in url else "?"
-            url = f"{url}{separator}{param_name}={self.credential}"
+            if self.credential:
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}{param_name}={self.credential}"
 
         return headers, url
+
+    def _get_atproto_token(self) -> Optional[str]:
+        """Get a valid ATProto access token, creating/refreshing session as needed."""
+        with self._session_lock:
+            now = datetime.utcnow()
+
+            # Check if we have a valid cached session
+            if self._atproto_session:
+                # Refresh if token expires in less than 5 minutes
+                if self._atproto_session.expires_at > now + timedelta(minutes=5):
+                    return self._atproto_session.access_jwt
+
+                # Try to refresh
+                if self._refresh_atproto_session():
+                    return self._atproto_session.access_jwt
+
+            # Create new session
+            if self._create_atproto_session():
+                return self._atproto_session.access_jwt
+
+            return None
+
+    def _create_atproto_session(self) -> bool:
+        """Create a new ATProto session using identifier and app password."""
+        if not self.identifier or not self.app_password:
+            logger.error("ATProto service missing identifier or app_password")
+            return False
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/com.atproto.server.createSession",
+                json={
+                    "identifier": self.identifier,
+                    "password": self.app_password
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # ATProto access tokens typically expire in 2 hours
+            self._atproto_session = ATProtoSession(
+                access_jwt=data["accessJwt"],
+                refresh_jwt=data["refreshJwt"],
+                did=data["did"],
+                handle=data["handle"],
+                expires_at=datetime.utcnow() + timedelta(hours=2)
+            )
+
+            logger.info(f"Created ATProto session for {data['handle']}")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to create ATProto session: {e}")
+            return False
+
+    def _refresh_atproto_session(self) -> bool:
+        """Refresh an existing ATProto session."""
+        if not self._atproto_session:
+            return False
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/com.atproto.server.refreshSession",
+                headers={"Authorization": f"Bearer {self._atproto_session.refresh_jwt}"},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            self._atproto_session = ATProtoSession(
+                access_jwt=data["accessJwt"],
+                refresh_jwt=data["refreshJwt"],
+                did=data["did"],
+                handle=data["handle"],
+                expires_at=datetime.utcnow() + timedelta(hours=2)
+            )
+
+            logger.info(f"Refreshed ATProto session for {data['handle']}")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Failed to refresh ATProto session: {e}")
+            self._atproto_session = None
+            return False
 
 
 class CredentialStore:
     """
     Load and manage service credentials from a JSON configuration file.
 
-    Expected JSON structure:
+    Simplified JSON structure:
     {
-        "service_name": {
-            "base_url": "https://api.example.com",
-            "auth_type": "bearer",
-            "credential": "your-api-token",
-            "auth_header": "X-Custom-Header",  // optional, for auth_type="header"
-            "query_param": "api_key"           // optional, for auth_type="query"
+        "bsky": {
+            "identifier": "handle.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx"
+        },
+        "github_api": {
+            "token": "ghp_..."
         }
     }
+
+    Known services (bsky, github_api) have hardcoded base URLs and auth types.
+    Custom services can specify full configuration.
     """
 
     def __init__(self, config_path: Optional[str] = None):
@@ -77,7 +214,6 @@ class CredentialStore:
         self._credentials: dict[str, ServiceCredential] = {}
 
         if config_path is None:
-            # Default to credentials.json in same directory
             config_path = os.path.join(os.path.dirname(__file__), "credentials.json")
 
         self._config_path = config_path
@@ -96,16 +232,10 @@ class CredentialStore:
 
             for service_name, service_config in config.items():
                 try:
-                    self._credentials[service_name] = ServiceCredential(
-                        base_url=service_config["base_url"],
-                        auth_type=service_config["auth_type"],
-                        credential=service_config["credential"],
-                        auth_header=service_config.get("auth_header"),
-                        query_param=service_config.get("query_param")
-                    )
-                    logger.info(f"Loaded credentials for service: {service_name}")
-                except KeyError as e:
-                    logger.error(f"Invalid config for service {service_name}: missing {e}")
+                    cred = self._parse_service_config(service_name, service_config)
+                    if cred:
+                        self._credentials[service_name] = cred
+                        logger.info(f"Loaded credentials for service: {service_name} (type: {cred.service_type})")
                 except Exception as e:
                     logger.error(f"Error loading service {service_name}: {e}")
 
@@ -115,6 +245,64 @@ class CredentialStore:
             logger.error(f"Invalid JSON in {self._config_path}: {e}")
         except Exception as e:
             logger.error(f"Error loading credentials: {e}")
+
+    def _parse_service_config(self, name: str, config: dict) -> Optional[ServiceCredential]:
+        """Parse a service configuration, using known defaults where applicable."""
+
+        # Check if this is a known service
+        known = KNOWN_SERVICES.get(name, {})
+        base_url = config.get("base_url") or known.get("base_url")
+        service_type = config.get("type") or known.get("type")
+
+        if not base_url:
+            logger.error(f"Service {name}: base_url required (not a known service)")
+            return None
+
+        # Infer type from config keys if not specified
+        if not service_type:
+            if "identifier" in config or "app_password" in config:
+                service_type = "atproto"
+            elif "token" in config or "credential" in config:
+                service_type = "bearer"
+            else:
+                logger.error(f"Service {name}: cannot infer service type")
+                return None
+
+        # Build ServiceCredential based on type
+        if service_type == "atproto":
+            return ServiceCredential(
+                service_type="atproto",
+                base_url=base_url,
+                identifier=config.get("identifier"),
+                app_password=config.get("app_password")
+            )
+
+        elif service_type == "bearer":
+            return ServiceCredential(
+                service_type="bearer",
+                base_url=base_url,
+                credential=config.get("token") or config.get("credential")
+            )
+
+        elif service_type == "header":
+            return ServiceCredential(
+                service_type="header",
+                base_url=base_url,
+                credential=config.get("credential"),
+                auth_header=config.get("auth_header")
+            )
+
+        elif service_type == "query":
+            return ServiceCredential(
+                service_type="query",
+                base_url=base_url,
+                credential=config.get("credential"),
+                query_param=config.get("query_param")
+            )
+
+        else:
+            logger.error(f"Service {name}: unknown service type '{service_type}'")
+            return None
 
     def get(self, service: str) -> Optional[ServiceCredential]:
         """

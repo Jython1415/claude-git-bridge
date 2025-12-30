@@ -5,74 +5,45 @@ MCP Server for Credential Proxy Session Management
 Exposes session management as MCP tools for Claude.ai custom connector.
 Uses Streamable HTTP transport for compatibility with Claude.ai browser.
 
-Authentication: Bearer token required (set MCP_AUTH_TOKEN env var)
+Authentication: GitHub OAuth with username allowlist
 """
 
 import os
-import secrets
 import logging
 import httpx
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from fastmcp.server.auth.providers.github import GitHubProvider
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 FLASK_URL = os.environ.get('FLASK_URL', 'http://localhost:8443')
-MCP_AUTH_TOKEN = os.environ.get('MCP_AUTH_TOKEN')
+GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
+GITHUB_CLIENT_SECRET = os.environ.get('GITHUB_CLIENT_SECRET')
+GITHUB_ALLOWED_USERS = os.environ.get('GITHUB_ALLOWED_USERS', '').split(',')
+BASE_URL = os.environ.get('BASE_URL', 'https://ganymede.tail0410a7.ts.net:10000')
 
-# Generate a token if not set (will be logged for initial setup)
-if not MCP_AUTH_TOKEN:
-    MCP_AUTH_TOKEN = secrets.token_urlsafe(32)
-    logger.warning("MCP_AUTH_TOKEN not set! Generated temporary token (add to .env):")
-    logger.warning(f"MCP_AUTH_TOKEN={MCP_AUTH_TOKEN}")
+# Validate GitHub OAuth configuration
+if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+    logger.error("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set!")
+    raise ValueError("Missing GitHub OAuth configuration")
 
+if not GITHUB_ALLOWED_USERS or GITHUB_ALLOWED_USERS == ['']:
+    logger.warning("No GitHub users in allowlist! Set GITHUB_ALLOWED_USERS")
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware to require bearer token authentication.
+# Create GitHub auth provider with allowlist
+auth = GitHubProvider(
+    client_id=GITHUB_CLIENT_ID,
+    client_secret=GITHUB_CLIENT_SECRET,
+    base_url=BASE_URL,
+    allowed_users=GITHUB_ALLOWED_USERS  # Only these GitHub usernames get access
+)
 
-    Claude.ai sends the token via Authorization header when configured
-    with authorization_token in the custom connector settings.
-    """
-
-    # Paths that don't require authentication
-    PUBLIC_PATHS = {'/health', '/healthz', '/.well-known'}
-
-    async def dispatch(self, request, call_next):
-        path = request.url.path
-
-        # Allow public paths
-        if any(path.startswith(p) for p in self.PUBLIC_PATHS):
-            return await call_next(request)
-
-        # Check Authorization header
-        auth_header = request.headers.get('Authorization', '')
-
-        if not auth_header.startswith('Bearer '):
-            return JSONResponse(
-                {"error": "missing or invalid Authorization header"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-        token = auth_header[7:]  # Remove "Bearer " prefix
-
-        if not secrets.compare_digest(token, MCP_AUTH_TOKEN):
-            return JSONResponse(
-                {"error": "invalid token"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-        return await call_next(request)
-
-
-# Initialize MCP server
+# Initialize MCP server with auth
 mcp = FastMCP(
     "credential-proxy",
-    stateless_http=True  # Important for scalability with remote connections
+    stateless_http=True,  # Important for scalability with remote connections
+    auth=auth  # GitHub OAuth authentication
 )
 
 
@@ -200,10 +171,8 @@ async def list_services() -> dict:
 
 
 def create_app():
-    """Create the ASGI app with authentication middleware."""
-    app = mcp.http_app()
-    app.add_middleware(BearerAuthMiddleware)
-    return app
+    """Create the ASGI app (FastMCP handles auth middleware automatically)."""
+    return mcp.http_app()
 
 
 if __name__ == "__main__":
@@ -217,14 +186,11 @@ if __name__ == "__main__":
 
     logger.info(f"Starting MCP server on port {port}")
     logger.info(f"Flask backend: {FLASK_URL}")
-    logger.info(f"Authentication: Bearer token required")
+    logger.info(f"Authentication: GitHub OAuth")
+    logger.info(f"Allowed GitHub users: {', '.join(GITHUB_ALLOWED_USERS)}")
+    logger.info(f"OAuth callback URL: {BASE_URL}/oauth/callback")
 
-    if os.environ.get('MCP_AUTH_TOKEN'):
-        logger.info("Using MCP_AUTH_TOKEN from environment")
-    else:
-        logger.warning("Add MCP_AUTH_TOKEN to .env for persistent token")
-
-    # Run with authentication middleware
+    # Run with FastMCP's built-in auth
     import uvicorn
     app = create_app()
     uvicorn.run(app, host="127.0.0.1", port=port)

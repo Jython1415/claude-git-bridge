@@ -9,7 +9,7 @@ Credential proxy enabling Claude.ai to access APIs and clone repositories withou
 ```
 Claude.ai
     │
-    ├── MCP Custom Connector (port 8001, Streamable HTTP)
+    ├── MCP Custom Connector (port 10000, Streamable HTTP)
     │       └── FastMCP server calling Flask API
     │
     └── Flask Proxy Server (port 8443)
@@ -31,7 +31,7 @@ Claude.ai
 ### MCP Server (`mcp/`)
 - `server.py` - FastMCP server with `create_session`, `revoke_session`, `list_services`
 - Runs on port 10000 with Streamable HTTP transport (Tailscale Funnel compatible)
-- Requires bearer token authentication (set `MCP_AUTH_TOKEN` env var)
+- Uses GitHub OAuth with username allowlist (set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_ALLOWED_USERS` env vars)
 
 ### Client (`skill-package/git-proxy/`)
 - `git_client.py` - Python client supporting both session and key auth
@@ -76,6 +76,12 @@ Git endpoints accept either auth method.
 PROXY_SECRET_KEY=<legacy-auth-key>
 PORT=8443
 DEBUG=false
+
+# GitHub OAuth for MCP Server
+GITHUB_CLIENT_ID=<github-oauth-app-client-id>
+GITHUB_CLIENT_SECRET=<github-oauth-app-secret>
+GITHUB_ALLOWED_USERS=Jython1415,other-username
+BASE_URL=https://ganymede.tail0410a7.ts.net:10000
 ```
 
 **Service Credentials (`server/credentials.json`):**
@@ -114,18 +120,16 @@ Both servers auto-start on login via LaunchAgents:
 launchctl list | grep joshuashew
 
 # Logs
-tail -f ~/Library/Logs/credential-proxy.log
-tail -f ~/Library/Logs/mcp-server.log
+tail -f ~/Library/Logs/com.joshuashew.credential-proxy.log
+tail -f ~/Library/Logs/com.joshuashew.mcp-server.log
 ```
 
 ## Tailscale Funnel
 
 ```bash
 # Expose both servers
-tailscale serve --bg --https=8443 http://127.0.0.1:8443
-tailscale serve --bg --https=8001 http://127.0.0.1:8001
-tailscale funnel 8443
-tailscale funnel 8001
+tailscale funnel --bg 8443
+tailscale funnel --bg 10000
 ```
 
 ## Dependencies
@@ -137,11 +141,12 @@ Managed via `pyproject.toml` and uv:
 
 ## Security Model
 
-- Credentials never leave the proxy server
-- Sessions expire automatically (default 30 min)
-- Sessions grant access to specific services only
-- Tailscale Funnel provides encrypted, authenticated tunnel
-- MCP server is authless (relies on Tailscale network security)
+- **MCP Authentication**: GitHub OAuth with username allowlist
+- **Access Control**: Only specified GitHub usernames can access MCP tools
+- **Credentials Protection**: API credentials never leave the proxy server
+- **Session Management**: Sessions expire automatically (default 30 min)
+- **Service Isolation**: Sessions grant access to specific services only
+- **Transport Security**: Tailscale Funnel provides encrypted HTTPS tunnel
 
 ## Service Configuration
 

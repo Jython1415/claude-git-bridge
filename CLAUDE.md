@@ -33,8 +33,10 @@ Claude.ai
 - Runs on port 10000 with Streamable HTTP transport (Tailscale Funnel compatible)
 - Uses GitHub OAuth with username allowlist (set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_ALLOWED_USERS` env vars)
 
-### Client (`skill-package/git-proxy/`)
-- `git_client.py` - Python client supporting both session and key auth
+### Skills (`skills/`)
+- `git-proxy/` - Git bundle proxy skill (Python library + packaging)
+  - `git_client.py` - Python client supporting both session and key auth
+- `bluesky-access/` - Bluesky API skill (standalone scripts)
 
 ## Authentication
 

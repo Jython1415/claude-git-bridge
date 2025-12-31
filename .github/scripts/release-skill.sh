@@ -1,11 +1,34 @@
 #!/bin/bash
 set -e
 
-# Release script for git-proxy skill
+# Release script for skills - auto-detects which skill's VERSION changed
 # Triggers on VERSION file changes or manual workflow dispatch
 
-SKILL_NAME="git-proxy"
-SKILL_DIR="skill-package/$SKILL_NAME"
+# Detect which skill's VERSION changed (only for push events)
+if [ "$EVENT_NAME" = "push" ]; then
+    CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+    VERSION_FILE=$(echo "$CHANGED_FILES" | grep 'skills/.*/VERSION' | head -n 1)
+
+    if [ -z "$VERSION_FILE" ]; then
+        echo "No VERSION file changed in skills/, skipping release"
+        exit 0
+    fi
+
+    # Extract skill name from path: skills/git-proxy/VERSION → git-proxy
+    SKILL_NAME=$(echo "$VERSION_FILE" | sed 's|skills/\([^/]*\)/VERSION|\1|')
+    echo "Detected skill from VERSION change: $SKILL_NAME"
+elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+    # For manual triggers, require skill name as input
+    # TODO: Add skill_name input to workflow
+    echo "Error: Manual workflow dispatch not yet supported for multi-skill"
+    echo "Please specify which skill to release"
+    exit 1
+else
+    echo "Error: Unsupported event type: $EVENT_NAME"
+    exit 1
+fi
+
+SKILL_DIR="skills/$SKILL_NAME"
 VERSION_FILE="$SKILL_DIR/VERSION"
 SKILL_MD="$SKILL_DIR/SKILL.md"
 
@@ -69,6 +92,14 @@ fi
 echo "ZIP contents:"
 unzip -l "$BUILD_DIR/$ZIP_NAME"
 
+# Extract skill display name and description from SKILL.md frontmatter
+SKILL_DISPLAY_NAME=$(grep "^name:" "$SKILL_MD" | sed 's/name: *//' | tr -d '\r')
+SKILL_DESCRIPTION=$(grep "^description:" "$SKILL_MD" | sed 's/description: *//' | tr -d '\r')
+
+if [ -z "$SKILL_DISPLAY_NAME" ]; then
+    SKILL_DISPLAY_NAME="$SKILL_NAME"
+fi
+
 # Generate release notes
 REPO_URL="https://github.com/$REPOSITORY"
 SKILL_URL="$REPO_URL/tree/main/$SKILL_DIR"
@@ -88,9 +119,9 @@ else
 fi
 
 RELEASE_NOTES=$(cat <<EOF
-# Git Proxy Skill v$VERSION
+# $SKILL_DISPLAY_NAME v$VERSION
 
-Clone and push to GitHub repositories from Claude.ai Projects using git bundles and a proxy server.
+$SKILL_DESCRIPTION
 
 ## What's Changed
 
@@ -114,7 +145,7 @@ EOF
 echo "Creating GitHub release..."
 gh release create "$TAG" \
     "$BUILD_DIR/$ZIP_NAME" \
-    --title "Git Proxy Skill v$VERSION" \
+    --title "$SKILL_DISPLAY_NAME v$VERSION" \
     --notes "$RELEASE_NOTES" \
     --repo "$REPOSITORY"
 

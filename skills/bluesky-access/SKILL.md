@@ -1,7 +1,6 @@
 ---
 name: bluesky-access
 description: Search and interact with Bluesky/ATProtocol via credential proxy
-version: 1.0.0
 ---
 
 # Bluesky Access Skill

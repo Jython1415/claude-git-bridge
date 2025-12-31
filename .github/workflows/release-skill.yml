@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'skill-package/git-proxy/VERSION'
+      - 'skills/*/VERSION'
   workflow_dispatch:
     inputs:
       version:

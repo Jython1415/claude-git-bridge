@@ -133,9 +133,12 @@ launchctl list | grep joshuashew
 - [mcp/README.md](mcp/README.md) - MCP server setup
 - [skills/bluesky-access/SKILL.md](skills/bluesky-access/SKILL.md) - Bluesky skill docs
 
-## Legacy Git-Only Skill
+## Available Skills
 
-The original git-proxy skill is still available at `skill-package/git-proxy/`. It uses the legacy `X-Auth-Key` authentication which is still supported for backward compatibility.
+- **git-proxy** (`skills/git-proxy/`) - Git bundle proxy for cloning and pushing repositories
+- **bluesky-access** (`skills/bluesky-access/`) - Bluesky/ATProtocol API access
+
+Both skills use session-based authentication via the credential proxy. Legacy `X-Auth-Key` authentication is still supported for backward compatibility.
 
 ## License
 

@@ -2,20 +2,38 @@
 set -e
 
 # Build the skill ZIP file for distribution
-# Usage: ./scripts/build_skill.sh
+# Usage: ./scripts/build_skill.sh <skill-name>
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-SKILL_DIR="$REPO_ROOT/skill-package/git-proxy"
 
-cd "$REPO_ROOT/skill-package"
+if [ -z "$1" ]; then
+    echo "Usage: $0 <skill-name>"
+    echo ""
+    echo "Available skills:"
+    ls -1 "$REPO_ROOT/skills"
+    exit 1
+fi
+
+SKILL_NAME="$1"
+SKILL_DIR="$REPO_ROOT/skills/$SKILL_NAME"
+
+if [ ! -d "$SKILL_DIR" ]; then
+    echo "Error: Skill directory not found: $SKILL_DIR"
+    echo ""
+    echo "Available skills:"
+    ls -1 "$REPO_ROOT/skills"
+    exit 1
+fi
+
+cd "$REPO_ROOT/skills"
 
 # Remove old ZIP if exists
-rm -f git-proxy-skill.zip
+rm -f "$SKILL_NAME-skill.zip"
 
 # Create ZIP (exclude VERSION - it's workflow metadata, not part of the skill)
-zip -r git-proxy-skill.zip git-proxy/ -x "git-proxy/VERSION"
+zip -r "$SKILL_NAME-skill.zip" "$SKILL_NAME" -x "$SKILL_NAME/VERSION" "$SKILL_NAME/*.zip"
 
-echo "✓ Created git-proxy-skill.zip"
+echo "✓ Created $SKILL_NAME-skill.zip"
 echo "ZIP contents:"
-unzip -l git-proxy-skill.zip
+unzip -l "$SKILL_NAME-skill.zip"
